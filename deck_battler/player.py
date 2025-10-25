@@ -32,6 +32,15 @@ class PlayerState:
     artifacts: List[str] = field(default_factory=list)
     strategic_choice_available: bool = False
 
+    morale: int = 10
+    max_morale: int = 30
+    active_tactic_id: str | None = None
+    tactic_attack_bonus: float = 0.0
+    tactic_defense_bonus: float = 0.0
+    tactic_speed_bonus: float = 0.0
+    tactic_damage_bonus: int = 0
+    tactic_rounds_remaining: int = 0
+
     win_streak: int = 0
     lose_streak: int = 0
     rounds_survived: int = 0
@@ -50,7 +59,14 @@ class PlayerState:
         return min(3, max(self.win_streak, self.lose_streak))
 
     def earn_gold(self, base: int = 5) -> int:
-        total = base + self.get_interest() + self.get_streak_bonus() + self.economy_bonus
+        morale_income = self.morale // 10
+        total = (
+            base
+            + self.get_interest()
+            + self.get_streak_bonus()
+            + self.economy_bonus
+            + morale_income
+        )
         self.gold += total
         return total
 
@@ -59,6 +75,8 @@ class PlayerState:
 
         self.strategic_choice_available = True
         self.decay_focus_preferences()
+        if self.tactic_rounds_remaining <= 0:
+            self.clear_tactic()
 
     def toggle_shop_lock(self) -> bool:
         """Flip the persistent shop lock state."""
@@ -85,6 +103,78 @@ class PlayerState:
         if self.hp <= 0:
             self.hp = 0
             self.is_eliminated = True
+
+    # ------------------------------------------------------------------
+    # Morale and tactics
+    # ------------------------------------------------------------------
+
+    def adjust_morale(self, delta: int) -> int:
+        self.morale = max(0, min(self.max_morale, self.morale + delta))
+        return self.morale
+
+    def activate_tactic(
+        self,
+        tactic_id: str,
+        *,
+        attack_bonus: float,
+        defense_bonus: float,
+        speed_bonus: float,
+        damage_bonus: int,
+        duration: int,
+        morale_cost: int,
+    ) -> Dict[str, float | int | str]:
+        self.adjust_morale(-morale_cost)
+        self.active_tactic_id = tactic_id
+        self.tactic_attack_bonus = attack_bonus
+        self.tactic_defense_bonus = defense_bonus
+        self.tactic_speed_bonus = speed_bonus
+        self.tactic_damage_bonus = damage_bonus
+        self.tactic_rounds_remaining = max(duration, 0)
+        return {
+            "tactic_id": tactic_id,
+            "attack_bonus": attack_bonus,
+            "defense_bonus": defense_bonus,
+            "speed_bonus": speed_bonus,
+            "damage_bonus": damage_bonus,
+            "rounds": self.tactic_rounds_remaining,
+            "morale_cost": morale_cost,
+        }
+
+    def clear_tactic(self) -> None:
+        self.active_tactic_id = None
+        self.tactic_attack_bonus = 0.0
+        self.tactic_defense_bonus = 0.0
+        self.tactic_speed_bonus = 0.0
+        self.tactic_damage_bonus = 0
+        self.tactic_rounds_remaining = 0
+
+    def resolve_combat_end(self) -> None:
+        if self.tactic_rounds_remaining > 0:
+            self.tactic_rounds_remaining -= 1
+            if self.tactic_rounds_remaining <= 0:
+                self.clear_tactic()
+
+    def get_combat_modifiers(self) -> Dict[str, float]:
+        morale_ratio = self.morale / max(1, self.max_morale)
+        morale_tier = self.morale // 5
+        return {
+            "attack_multiplier": 1.0 + 0.08 * morale_ratio + self.tactic_attack_bonus,
+            "defense_multiplier": 1.0 + 0.06 * morale_ratio + self.tactic_defense_bonus,
+            "speed_bonus": self.tactic_speed_bonus,
+            "damage_bonus": float(self.tactic_damage_bonus + max(0, morale_tier // 2)),
+        }
+
+    def serialize_tactic(self) -> Dict[str, float | int | str] | None:
+        if not self.active_tactic_id:
+            return None
+        return {
+            "id": self.active_tactic_id,
+            "rounds_remaining": self.tactic_rounds_remaining,
+            "attack_bonus": self.tactic_attack_bonus,
+            "defense_bonus": self.tactic_defense_bonus,
+            "speed_bonus": self.tactic_speed_bonus,
+            "damage_bonus": self.tactic_damage_bonus,
+        }
 
     def add_to_deck(self, unit: Unit) -> tuple[bool, List[Dict[str, int]]]:
         """Add a unit to the deck and attempt automatic merges."""

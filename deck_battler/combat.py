@@ -21,8 +21,16 @@ class CombatEngine:
         self.has_grace = False
         self.synergy_levels_a = {}
         self.synergy_levels_b = {}
+        self.modifiers_a: dict = {}
+        self.modifiers_b: dict = {}
 
-    def simulate_combat(self, deck_a: List[Unit], deck_b: List[Unit]) -> Tuple[bool, int]:
+    def simulate_combat(
+        self,
+        deck_a: List[Unit],
+        deck_b: List[Unit],
+        modifiers_a: dict | None = None,
+        modifiers_b: dict | None = None,
+    ) -> Tuple[bool, int]:
         """Simulate combat between the two decks."""
         self.team_a = [u.copy() for u in deck_a]
         self.team_b = [u.copy() for u in deck_b]
@@ -30,6 +38,11 @@ class CombatEngine:
         self.has_grace = False
         self.synergy_levels_a = apply_synergy_effects(self.team_a, self.team_b)
         self.synergy_levels_b = apply_synergy_effects(self.team_b, self.team_a)
+        self.modifiers_a = modifiers_a or {}
+        self.modifiers_b = modifiers_b or {}
+
+        self._apply_modifiers(self.team_a, self.modifiers_a)
+        self._apply_modifiers(self.team_b, self.modifiers_b)
 
         self._trigger_abilities(TriggerType.COMBAT_START)
 
@@ -44,15 +57,17 @@ class CombatEngine:
         team_b_alive = self._are_alive(self.team_b)
 
         if team_a_alive and not team_b_alive:
-            return True, self._calculate_damage(self.team_a)
+            return True, self._calculate_damage(self.team_a, self.modifiers_a)
         if team_b_alive and not team_a_alive:
-            return False, self._calculate_damage(self.team_b)
+            return False, self._calculate_damage(self.team_b, self.modifiers_b)
 
         hp_a = sum(u.hp for u in self.team_a if u.is_alive)
         hp_b = sum(u.hp for u in self.team_b if u.is_alive)
         if hp_a >= hp_b:
-            return True, max(1, int((hp_a - hp_b) / 10))
-        return False, max(1, int((hp_b - hp_a) / 10))
+            damage = max(1, int((hp_a - hp_b) / 10))
+            return True, self._apply_damage_bonus(damage, self.modifiers_a)
+        damage = max(1, int((hp_b - hp_a) / 10))
+        return False, self._apply_damage_bonus(damage, self.modifiers_b)
 
     # ------------------------------------------------------------------
     # Combat loop
@@ -138,8 +153,29 @@ class CombatEngine:
     def _are_alive(self, team: List[Unit]) -> bool:
         return any(unit.is_alive for unit in team)
 
-    def _calculate_damage(self, team: List[Unit]) -> int:
-        return max(1, int(sum(u.star_level for u in team if u.is_alive)))
+    def _calculate_damage(self, team: List[Unit], modifiers: dict) -> int:
+        base = max(1, int(sum(u.star_level for u in team if u.is_alive)))
+        return self._apply_damage_bonus(base, modifiers)
+
+    def _apply_damage_bonus(self, damage: int, modifiers: dict) -> int:
+        bonus = int(modifiers.get("damage_bonus", 0)) if modifiers else 0
+        return max(1, damage + bonus)
+
+    def _apply_modifiers(self, team: List[Unit], modifiers: dict) -> None:
+        if not modifiers:
+            return
+        attack_multiplier = float(modifiers.get("attack_multiplier", 1.0))
+        defense_multiplier = float(modifiers.get("defense_multiplier", 1.0))
+        speed_bonus = float(modifiers.get("speed_bonus", 0.0))
+        hp_multiplier = float(modifiers.get("hp_multiplier", 1.0))
+        shield = float(modifiers.get("shield", 0.0))
+
+        for unit in team:
+            unit.atk *= attack_multiplier
+            unit.defense *= defense_multiplier
+            unit.speed += speed_bonus
+            unit.max_hp *= hp_multiplier
+            unit.hp = min(unit.hp + shield, unit.max_hp)
 
     # ------------------------------------------------------------------
     # Ability helper API used by card definitions

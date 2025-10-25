@@ -45,6 +45,18 @@ class StrategicOption:
             data["reward_value"] = self.payload["reward_value"]
         if "rarity" in self.payload and isinstance(self.payload["rarity"], Rarity):
             data["rarity"] = self.payload["rarity"].name
+        if "morale_cost" in self.payload:
+            data["morale_cost"] = self.payload["morale_cost"]
+        if "label" in self.payload:
+            data["label"] = self.payload["label"]
+        if "attack_bonus" in self.payload:
+            data["attack_bonus"] = self.payload["attack_bonus"]
+        if "defense_bonus" in self.payload:
+            data["defense_bonus"] = self.payload["defense_bonus"]
+        if "speed_bonus" in self.payload:
+            data["speed_bonus"] = self.payload["speed_bonus"]
+        if "damage_bonus" in self.payload:
+            data["damage_bonus"] = self.payload["damage_bonus"]
         if "artifact" in self.payload:
             artifact = self.payload["artifact"]
             if isinstance(artifact, Artifact):
@@ -74,6 +86,9 @@ class StrategicPlanner:
         candidates.append(self._make_training_option(player, active_sects))
         candidates.append(self._make_expedition_option(player, active_sects))
         candidates.append(self._make_artifact_option(player))
+        tactic_option = self._make_tactic_option(player)
+        if tactic_option:
+            candidates.append(tactic_option)
 
         # Ensure consistent variety and shuffle for randomness.
         filtered = [option for option in candidates if option is not None]
@@ -155,6 +170,42 @@ class StrategicPlanner:
                 "reward_value": reward_value,
                 "rarity": rarity,
                 "sect": sect,
+            },
+        )
+
+    def _make_tactic_option(self, player: "PlayerState") -> Optional[StrategicOption]:
+        morale = max(0, player.morale)
+        if player.max_morale <= 0:
+            return None
+        morale_cost = max(3, min(8, morale // 2 + 3))
+        if morale < morale_cost:
+            morale_cost = max(2, morale // 2 + 2)
+        attack_bonus = round(0.08 + 0.01 * player.win_streak, 3)
+        defense_bonus = round(0.06 + 0.005 * len(player.deck), 3)
+        speed_bonus = 0.02 + (0.01 * min(player.lose_streak, 3))
+        damage_bonus = 1 + max(0, player.win_streak // 2)
+        duration = 1 + (1 if player.win_streak >= 2 else 0)
+        labels = [
+            "Phalanx Formation",
+            "Storm Surge",
+            "Veil Ambush",
+            "Blade Carousel",
+        ]
+        label = self.rng.choice(labels)
+        return StrategicOption(
+            id=f"tactic_{label.lower().replace(' ', '_')}",
+            name=f"Battle Plan: {label}",
+            description="Spend morale to enact a multi-round combat formation.",
+            cost=0,
+            option_type="tactic",
+            payload={
+                "morale_cost": morale_cost,
+                "label": label,
+                "attack_bonus": attack_bonus,
+                "defense_bonus": defense_bonus,
+                "speed_bonus": speed_bonus,
+                "damage_bonus": damage_bonus,
+                "duration": duration,
             },
         )
 

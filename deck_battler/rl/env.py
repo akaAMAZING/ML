@@ -22,9 +22,9 @@ MAX_DECK_SIZE = 10
 MAX_STRATEGIC_OPTIONS = 3
 _CARD_FEATURES = 8
 _UNIT_FEATURES = 9
-_PLAYER_FEATURES = 15
+_PLAYER_FEATURES = 20
 _SYNERGY_FEATURES = len(list(Sect))
-_STRATEGIC_FEATURES = 5
+_STRATEGIC_FEATURES = 6
 
 
 @dataclass
@@ -41,6 +41,7 @@ class RewardConfig:
     focus_reward: float = 0.05
     training_reward: float = 0.12
     artifact_reward: float = 0.18
+    tactic_reward: float = 0.14
     expedition_success_bonus: float = 0.25
     expedition_failure_penalty: float = -0.15
     invalid_action_penalty: float = -0.1
@@ -48,6 +49,8 @@ class RewardConfig:
     gold_scale: float = 0.01
     board_value_scale: float = 0.001
     combat_damage_scale: float = 0.1
+    morale_spend_scale: float = 0.02
+    morale_gain_scale: float = 0.05
     win_bonus: float = 1.0
     loss_penalty: float = 0.5
     elimination_bonus: float = 3.0
@@ -232,8 +235,12 @@ class DeckBattlerEnv(gym.Env):
                 reward += self.reward_config.expedition_success_bonus
             else:
                 reward += self.reward_config.expedition_failure_penalty
+        elif option_type == "tactic":
+            reward += self.reward_config.tactic_reward
 
         reward += metadata.get("gold_gain", 0) * self.reward_config.gold_scale
+        morale_spent = metadata.get("morale_spent", 0)
+        reward += morale_spent * self.reward_config.morale_spend_scale
         return reward + self._board_delta_reward()
 
     def _resolve_round(self) -> Tuple[float, bool]:
@@ -244,6 +251,7 @@ class DeckBattlerEnv(gym.Env):
         opponent = self.opponent_player
         prev_hp = player.hp
         prev_opponent_hp = opponent.hp
+        prev_morale = player.morale
 
         opponent_actions = self.opponent.play_round(self.game, 1)
         for action in opponent_actions:
@@ -252,6 +260,7 @@ class DeckBattlerEnv(gym.Env):
         winner, _ = self.game.run_combat(0, 1)
         damage_to_opponent = prev_opponent_hp - opponent.hp
         damage_taken = prev_hp - player.hp
+        morale_delta = player.morale - prev_morale
 
         reward = (
             (damage_to_opponent - damage_taken) * self.reward_config.combat_damage_scale
@@ -265,6 +274,8 @@ class DeckBattlerEnv(gym.Env):
             reward += self.reward_config.elimination_bonus
         if player.is_eliminated:
             reward -= self.reward_config.elimination_penalty
+
+        reward += morale_delta * self.reward_config.morale_gain_scale
 
         terminated = player.is_eliminated or opponent.is_eliminated or self.game.is_game_over()
 
@@ -365,6 +376,10 @@ class DeckBattlerEnv(gym.Env):
 
     def _encode_player(self, player: PlayerState) -> List[float]:
         focus_total = sum(player.focus_preferences.values())
+        morale_ratio = player.morale / max(1, player.max_morale)
+        tactic_duration = min(player.tactic_rounds_remaining, 3) / 3.0
+        tactic_offense = player.tactic_attack_bonus + player.tactic_damage_bonus / 5.0
+        tactic_support = player.tactic_defense_bonus
         return [
             player.hp / 100,
             player.gold / 100,
@@ -381,6 +396,11 @@ class DeckBattlerEnv(gym.Env):
             player.expedition_safety / 10,
             len(player.artifacts) / 10,
             1.0 if player.strategic_choice_available else 0.0,
+            morale_ratio,
+            tactic_duration,
+            tactic_offense,
+            tactic_support,
+            player.tactic_speed_bonus,
         ]
 
     def _encode_option(
@@ -388,8 +408,14 @@ class DeckBattlerEnv(gym.Env):
     ) -> List[float]:
         if option is None:
             return [0.0] * _STRATEGIC_FEATURES
-        type_map = {"focus": 0.0, "training": 1.0, "artifact": 2.0, "expedition": 3.0}
-        option_type = type_map.get(option.option_type, 0.0) / 3.0
+        type_map = {
+            "focus": 0.0,
+            "training": 1.0,
+            "artifact": 2.0,
+            "expedition": 3.0,
+            "tactic": 4.0,
+        }
+        option_type = type_map.get(option.option_type, 0.0) / 4.0
         cost = option.cost / 10.0
         if option.option_type == "focus":
             sect = option.payload.get("sect")
@@ -397,7 +423,7 @@ class DeckBattlerEnv(gym.Env):
             sect_idx = 0.0
             if sect is not None:
                 sect_idx = self._sect_to_idx[sect] / max(1, len(self._sect_to_idx) - 1)
-            return [option_type, cost, sect_idx, duration / 6.0, 0.0]
+            return [option_type, cost, sect_idx, duration / 6.0, 0.0, 0.0]
         if option.option_type == "training":
             sect = option.payload.get("sect")
             stat = option.payload.get("stat", "atk")
@@ -412,6 +438,7 @@ class DeckBattlerEnv(gym.Env):
                 sect_idx,
                 stat_map.get(stat, 0.0),
                 amount / 30.0,
+                0.0,
             ]
         if option.option_type == "artifact":
             artifact = option.payload.get("artifact")
@@ -421,6 +448,7 @@ class DeckBattlerEnv(gym.Env):
                 cost,
                 power / 5.0,
                 len(player.artifacts) / 10.0,
+                0.0,
                 0.0,
             ]
         if option.option_type == "expedition":
@@ -433,8 +461,23 @@ class DeckBattlerEnv(gym.Env):
                 risk / 12.0,
                 success,
                 reward_value / 20.0,
+                0.0,
             ]
-        return [option_type, cost, 0.0, 0.0, 0.0]
+        if option.option_type == "tactic":
+            morale_cost = option.payload.get("morale_cost", 0)
+            attack_bonus = option.payload.get("attack_bonus", 0.0)
+            defense_bonus = option.payload.get("defense_bonus", 0.0)
+            speed_bonus = option.payload.get("speed_bonus", 0.0)
+            duration = option.payload.get("duration", 1)
+            return [
+                option_type,
+                morale_cost / max(1, player.max_morale),
+                attack_bonus,
+                defense_bonus,
+                speed_bonus,
+                duration / 3.0,
+            ]
+        return [option_type, cost, 0.0, 0.0, 0.0, 0.0]
 
     def _encode_synergies(self, units: List[Unit]) -> List[float]:
         levels = get_synergy_levels(units)
@@ -476,7 +519,9 @@ class DeckBattlerEnv(gym.Env):
                 and player.strategic_choice_available
                 and player.gold >= options[idx].cost
             ):
-                mask[action_idx] = 1
+                morale_cost = options[idx].payload.get("morale_cost", 0)
+                has_morale = player.morale >= morale_cost
+                mask[action_idx] = 1 if has_morale else 0
             else:
                 mask[action_idx] = 0
         return mask
@@ -508,6 +553,12 @@ class DeckBattlerEnv(gym.Env):
         value += player.training_bonus * 15.0
         value += len(player.artifacts) * 40.0
         value += player.expedition_safety * 5.0
+        value += player.morale * 2.5
+        value += player.tactic_rounds_remaining * 20.0
+        value += player.tactic_attack_bonus * 80.0
+        value += player.tactic_defense_bonus * 60.0
+        value += player.tactic_speed_bonus * 40.0
+        value += player.tactic_damage_bonus * 25.0
         return value
 
     def _execute_opponent_action(self, action: Dict[str, int | str]) -> None:
