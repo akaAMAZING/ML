@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -12,6 +12,7 @@ from torch.optim import Adam
 from tqdm import trange
 
 from .env import DeckBattlerEnv
+from .metrics import UpdateMetrics, explained_variance
 
 
 @dataclass
@@ -88,12 +89,21 @@ class PPOTrainer:
 
         self.training_returns: List[float] = []
         self.training_lengths: List[int] = []
+        self.update_metrics: List[UpdateMetrics] = []
+        self.last_update_metrics: Optional[UpdateMetrics] = None
 
-    def train(self, total_updates: Optional[int] = None, *, progress_bar: bool = True) -> None:
+    def train(
+        self,
+        total_updates: Optional[int] = None,
+        *,
+        progress_bar: bool = True,
+        callbacks: Optional[Sequence[Callable[[UpdateMetrics], None]]] = None,
+    ) -> None:
         updates = total_updates or self.config.total_updates
         obs, info = self.env.reset()
         mask = info["action_mask"].astype(bool)
         last_done = False
+        callback_list = list(callbacks or [])
 
         iterator: Iterable[int]
         update_desc = None
@@ -109,11 +119,17 @@ class PPOTrainer:
             obs = batch["next_obs"]
             mask = batch["next_mask"]
             last_done = batch["next_done"]
-            self._update_policy(batch)
+            metrics = self._update_policy(batch)
+            self.last_update_metrics = metrics
+            self.update_metrics.append(metrics)
+            for callback in callback_list:
+                callback(metrics)
 
             if update_desc:
                 mean_return = np.mean(self.training_returns[-10:]) if self.training_returns else 0.0
-                update_desc(f"Return {mean_return: .2f}")
+                update_desc(
+                    f"Return {mean_return: .2f} · KL {metrics.approx_kl: .4f} · EV {metrics.value_explained_variance: .2f}"
+                )
 
         if last_done:
             self.env.reset()
@@ -223,7 +239,7 @@ class PPOTrainer:
     # Optimisation step
     # ------------------------------------------------------------------
 
-    def _update_policy(self, batch: Dict[str, object]) -> None:
+    def _update_policy(self, batch: Dict[str, object]) -> UpdateMetrics:
         obs = torch.tensor(batch["obs"], dtype=torch.float32, device=self.device)
         actions = torch.tensor(batch["actions"], dtype=torch.int64, device=self.device)
         old_log_probs = torch.tensor(batch["log_probs"], dtype=torch.float32, device=self.device)
@@ -233,12 +249,20 @@ class PPOTrainer:
 
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         batch_size = obs.shape[0]
+        total_actor_loss = 0.0
+        total_value_loss = 0.0
+        total_entropy = 0.0
+        total_clip_fraction = 0.0
+        total_kl = 0.0
+        total_weight = 0
 
         for _ in range(self.config.update_epochs):
             indices = torch.randperm(batch_size, device=self.device)
             for start in range(0, batch_size, self.config.minibatch_size):
                 end = start + self.config.minibatch_size
                 mb_idx = indices[start:end]
+                if mb_idx.numel() == 0:
+                    continue
 
                 mb_obs = obs[mb_idx]
                 mb_actions = actions[mb_idx]
@@ -251,7 +275,8 @@ class PPOTrainer:
                     mb_obs, mb_masks, mb_actions
                 )
 
-                ratio = (new_log_probs - mb_old_log_probs).exp()
+                log_ratio = new_log_probs - mb_old_log_probs
+                ratio = log_ratio.exp()
                 surrogate_1 = ratio * mb_advantages
                 surrogate_2 = torch.clamp(
                     ratio, 1.0 - self.config.clip_range, 1.0 + self.config.clip_range
@@ -259,18 +284,46 @@ class PPOTrainer:
                 actor_loss = -torch.min(surrogate_1, surrogate_2).mean()
 
                 value_loss = (mb_returns - values).pow(2).mean()
-                entropy_loss = entropy.mean()
+                entropy_mean = entropy.mean()
 
                 loss = (
                     actor_loss
                     + self.config.value_coef * value_loss
-                    - self.config.entropy_coef * entropy_loss
+                    - self.config.entropy_coef * entropy_mean
                 )
 
                 self.optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.policy.parameters(), self.config.max_grad_norm)
                 self.optimizer.step()
+
+                weight = mb_idx.numel()
+                total_weight += weight
+                total_actor_loss += float(actor_loss.item()) * weight
+                total_value_loss += float(value_loss.item()) * weight
+                total_entropy += float(entropy_mean.item()) * weight
+                clip_fraction = torch.mean(
+                    (torch.abs(ratio - 1.0) > self.config.clip_range).float()
+                )
+                approx_kl = torch.mean(mb_old_log_probs - new_log_probs)
+                total_clip_fraction += float(clip_fraction.item()) * weight
+                total_kl += float(approx_kl.item()) * weight
+
+        normaliser = max(1, total_weight)
+        with torch.no_grad():
+            _, value_preds = self.policy.forward(obs)
+        value_explained_variance = explained_variance(
+            value_preds.detach().cpu().numpy(), returns.detach().cpu().numpy()
+        )
+
+        return UpdateMetrics(
+            actor_loss=total_actor_loss / normaliser,
+            value_loss=total_value_loss / normaliser,
+            entropy=total_entropy / normaliser,
+            approx_kl=total_kl / normaliser,
+            clip_fraction=total_clip_fraction / normaliser,
+            value_explained_variance=value_explained_variance,
+        )
 
     # ------------------------------------------------------------------
     # Evaluation helpers

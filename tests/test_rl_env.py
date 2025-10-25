@@ -1,4 +1,6 @@
-import numpy as np
+import pytest
+
+np = pytest.importorskip("numpy")
 
 from deck_battler.rl import DeckBattlerEnv, PPOConfig
 from deck_battler.training import RLTrainingSession
@@ -40,3 +42,25 @@ def test_training_session_smoke():
     assert report.total_updates == 1
     assert isinstance(report.mean_return, float)
     assert isinstance(report.history, list)
+    assert isinstance(report.update_metrics, list)
+
+
+def test_action_mask_respects_reroll_discount():
+    env = DeckBattlerEnv()
+    env.reset()
+    player = env.player
+    player.gold = 0
+    player.reroll_discount = 3
+    mask = env._action_mask()
+    assert mask[env.reroll_index] == 1
+
+
+def test_ppo_records_update_metrics():
+    env = DeckBattlerEnv()
+    config = PPOConfig(rollout_steps=32, minibatch_size=16, update_epochs=1, total_updates=1)
+    session = RLTrainingSession(config=config)
+    session.train(progress_bar=False)
+    assert session.trainer.update_metrics, "Expected PPO trainer to record metrics"
+    metrics = session.trainer.update_metrics[-1]
+    assert metrics.actor_loss >= 0
+    assert metrics.clip_fraction >= 0

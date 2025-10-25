@@ -463,7 +463,8 @@ class DeckBattlerEnv(gym.Env):
         for idx in range(MAX_DECK_SIZE):
             mask[self.sell_offset + idx] = 1 if idx < len(player.deck) else 0
 
-        mask[self.reroll_index] = 1 if player.gold >= 2 else 0
+        reroll_cost = max(0, 2 - player.reroll_discount)
+        mask[self.reroll_index] = 1 if player.gold >= reroll_cost else 0
         mask[self.level_index] = 1 if player.can_level_up() else 0
         mask[self.lock_index] = 1
         mask[self.end_turn_index] = 1
@@ -523,5 +524,11 @@ class DeckBattlerEnv(gym.Env):
             self.game.level_up(1)
         elif action_type == "lock":
             self.game.lock_shop(1)
+        elif action_type == "strategic":
+            option_idx = int(action.get("option_idx", -1))
+            self.game.choose_strategic_option(1, option_idx)
+        elif action_type == "end_turn":
+            # Opponent end turn is implicit once their scripted actions finish,
+            # but allowing the marker keeps training logs readable.
+            return
 
-*** End Patch
