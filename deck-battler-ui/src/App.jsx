@@ -113,6 +113,11 @@ export default function DeckBattlerApp() {
   const [message, setMessage] = useState('');
   const [combatLog, setCombatLog] = useState([]);
   const wsRef = useRef(null);
+  const gameIdRef = useRef(null);
+
+  useEffect(() => {
+    gameIdRef.current = gameId;
+  }, [gameId]);
 
   const updateStateFromServer = (state) => {
     setGameState(state);
@@ -132,6 +137,7 @@ export default function DeckBattlerApp() {
       });
       const data = await response.json();
       setGameId(data.game_id);
+      gameIdRef.current = data.game_id;
       updateStateFromServer(data.game_state);
       connectWebSocket(data.game_id);
       setPhase('shop');
@@ -145,7 +151,8 @@ export default function DeckBattlerApp() {
   // Connect WebSocket
   const connectWebSocket = (gId) => {
     const ws = new WebSocket(`${WS_URL}/ws/game/${gId}`);
-    
+    gameIdRef.current = gId;
+
     ws.onopen = () => {
       console.log('WebSocket connected');
     };
@@ -208,14 +215,15 @@ export default function DeckBattlerApp() {
 
   // Buy card
   const buyCard = async (cardIdx) => {
-    if (!gameId) return;
+    const id = gameIdRef.current;
+    if (!id) return;
 
     try {
       await fetch(`${API_URL}/api/game/action`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          game_id: gameId,
+          game_id: id,
           player_id: 0,
           action: { type: 'buy', card_idx: cardIdx }
         })
@@ -226,13 +234,14 @@ export default function DeckBattlerApp() {
   };
 
   const rerollShop = async () => {
-    if (!gameId) return;
+    const id = gameIdRef.current;
+    if (!id) return;
     try {
       await fetch(`${API_URL}/api/game/action`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          game_id: gameId,
+          game_id: id,
           player_id: 0,
           action: { type: 'reroll' }
         })
@@ -244,14 +253,15 @@ export default function DeckBattlerApp() {
 
   // Level up
   const levelUp = async () => {
-    if (!gameId) return;
+    const id = gameIdRef.current;
+    if (!id) return;
 
     try {
       await fetch(`${API_URL}/api/game/action`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          game_id: gameId,
+          game_id: id,
           player_id: 0,
           action: { type: 'level' }
         })
@@ -263,14 +273,15 @@ export default function DeckBattlerApp() {
 
   // Sell unit
   const sellUnit = async (deckIdx) => {
-    if (!gameId) return;
-    
+    const id = gameIdRef.current;
+    if (!id) return;
+
     try {
       await fetch(`${API_URL}/api/game/action`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          game_id: gameId,
+          game_id: id,
           player_id: 0,
           action: { type: 'sell', deck_idx: deckIdx }
         })
@@ -287,7 +298,10 @@ export default function DeckBattlerApp() {
     
     try {
       // AI takes turn
-      await fetch(`${API_URL}/api/game/${gameId}/ai-turn?player_id=1`, {
+      const id = gameIdRef.current;
+      if (!id) return;
+
+      await fetch(`${API_URL}/api/game/${id}/ai-turn?player_id=1`, {
         method: 'POST'
       });
     } catch (error) {
@@ -298,7 +312,10 @@ export default function DeckBattlerApp() {
   // Run combat
   const runCombat = async () => {
     try {
-      await fetch(`${API_URL}/api/game/${gameId}/combat`, {
+      const id = gameIdRef.current;
+      if (!id) return;
+
+      await fetch(`${API_URL}/api/game/${id}/combat`, {
         method: 'POST'
       });
     } catch (error) {
@@ -308,7 +325,10 @@ export default function DeckBattlerApp() {
 
   const startNextRound = async () => {
     try {
-      await fetch(`${API_URL}/api/game/${gameId}/round/start`, {
+      const id = gameIdRef.current;
+      if (!id) return;
+
+      await fetch(`${API_URL}/api/game/${id}/round/start`, {
         method: 'POST'
       });
     } catch (error) {
@@ -391,6 +411,7 @@ export default function DeckBattlerApp() {
               setPhase('menu');
               setGameState(null);
               setGameId(null);
+              gameIdRef.current = null;
             }}
             className="px-8 py-4 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white font-bold text-xl rounded-lg shadow-2xl transform hover:scale-105 transition-all duration-200"
           >
