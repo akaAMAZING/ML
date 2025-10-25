@@ -11,6 +11,7 @@ from .rl import (
     RewardConfig,
     ScriptedOpponent,
 )
+from .rl.metrics import UpdateMetrics
 
 
 @dataclass
@@ -22,6 +23,7 @@ class TrainingReport:
     mean_return: float
     mean_length: float
     history: list[float] = field(default_factory=list)
+    update_metrics: list[UpdateMetrics] = field(default_factory=list)
 
 
 class RLTrainingSession:
@@ -54,6 +56,7 @@ class RLTrainingSession:
             mean_return=metrics["mean_return"],
             mean_length=metrics["mean_length"],
             history=list(self.trainer.training_returns),
+            update_metrics=list(self.trainer.update_metrics),
         )
 
     def save(self, path: str) -> None:

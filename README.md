@@ -116,6 +116,7 @@ The repository now ships with a production-ready reinforcement learning stack:
 - **`RewardConfig`** – granular reward shaping knobs balancing economy management, board development, and combat performance.
 - **`PPOTrainer`** – a battle-tested implementation of Proximal Policy Optimisation with GAE, clipped ratios, entropy regularisation, and gradient norm clipping.
 - **`RLTrainingSession`** – one-line orchestration that wires the environment, scripted opponents, and PPO trainer together.
+- **Granular telemetry** – every PPO update records actor/value losses, entropy, KL divergence, clip fraction, and value head explained variance so you can chart stability or drive dashboards.
 
 Example training run:
 
@@ -129,6 +130,7 @@ report = session.train(progress_bar=True)
 
 print(f"Mean return: {report.mean_return:.2f}")
 print(f"Training history (last 5): {report.history[-5:]}")
+print(f"Latest metrics: {report.update_metrics[-1].to_dict()}")
 session.save("experiments/ppo_agent.pth")
 ```
 
