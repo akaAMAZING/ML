@@ -1,51 +1,63 @@
-"""Utilities for running lightweight self-play training loops."""
+"""High level helpers for running PPO training for Deck Battler."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List
+from dataclasses import dataclass, field
+from typing import Dict, Optional
 
-from .agent import DeckBattlerAgent
-from .game import GameState
+from .rl import (
+    DeckBattlerEnv,
+    PPOConfig,
+    PPOTrainer,
+    RewardConfig,
+    ScriptedOpponent,
+)
 
 
 @dataclass
-class EpisodeResult:
-    winner: int
-    rounds: int
-    damage_dealt: List[int]
+class TrainingReport:
+    """Summary statistics returned after a training run."""
+
+    config: PPOConfig
+    total_updates: int
+    mean_return: float
+    mean_length: float
+    history: list[float] = field(default_factory=list)
 
 
-class SelfPlaySession:
-    """Simulate games between heuristic agents to bootstrap data."""
+class RLTrainingSession:
+    """Orchestrates environment creation and PPO training."""
 
-    def __init__(self, episodes: int = 10) -> None:
-        self.episodes = episodes
-        self.agent_pool = [DeckBattlerAgent(seed=i) for i in range(8)]
+    def __init__(
+        self,
+        *,
+        config: Optional[PPOConfig] = None,
+        reward_config: Optional[RewardConfig] = None,
+        opponent: Optional[ScriptedOpponent] = None,
+        env_kwargs: Optional[Dict] = None,
+    ) -> None:
+        env_kwargs = dict(env_kwargs or {})
+        opponent = opponent or ScriptedOpponent()
+        env = DeckBattlerEnv(
+            opponent=opponent,
+            reward_config=reward_config,
+            **env_kwargs,
+        )
+        self.env = env
+        self.trainer = PPOTrainer(env, config=config)
 
-    def run(self) -> List[EpisodeResult]:
-        results: List[EpisodeResult] = []
-        for episode in range(self.episodes):
-            game = GameState(num_players=2)
-            agents = self.agent_pool[:2]
+    def train(self, total_updates: Optional[int] = None, *, progress_bar: bool = True) -> TrainingReport:
+        self.trainer.train(total_updates=total_updates, progress_bar=progress_bar)
+        metrics = self.trainer.evaluate(episodes=10)
+        return TrainingReport(
+            config=self.trainer.config,
+            total_updates=total_updates or self.trainer.config.total_updates,
+            mean_return=metrics["mean_return"],
+            mean_length=metrics["mean_length"],
+            history=list(self.trainer.training_returns),
+        )
 
-            while not game.is_game_over():
-                game.start_round()
-                for player_id, agent in enumerate(agents):
-                    shop = game.generate_shop(player_id)
-                    actions = agent.select_actions(game, player_id, shop)
-                    for action in actions:
-                        if action["type"] == "buy":
-                            game.buy_card(player_id, action["card_idx"])
-                        elif action["type"] == "level":
-                            game.level_up(player_id)
-                game.run_combat(0, 1)
+    def save(self, path: str) -> None:
+        self.trainer.save(path)
 
-            winner = max(range(2), key=lambda idx: game.players[idx].hp)
-            results.append(
-                EpisodeResult(
-                    winner=winner,
-                    rounds=game.current_round,
-                    damage_dealt=[p.total_damage_dealt for p in game.players[:2]],
-                )
-            )
-        return results
+    def load(self, path: str) -> None:
+        self.trainer.load(path)

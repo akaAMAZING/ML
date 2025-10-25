@@ -7,7 +7,7 @@ Welcome to the lovingly rebuilt Deck Battler project. This repository delivers a
 - **Modular Python engine** – the new `deck_battler` package cleanly separates cards, combat, game state, and agent logic so you can tweak systems without spelunking through a monolith.
 - **FastAPI backend** – a lightweight real-time API with WebSocket updates keeps the UI in sync with every shop reroll, combat round, and AI move.
 - **React + Tailwind UI** – a polished command center where you can manage your deck, follow combat logs, and monitor both players’ boards in real time.
-- **Self-play sandbox** – simulate matches between heuristic agents with `SelfPlaySession` to generate data or baseline behaviours for future reinforcement learning experiments.
+- **RL training stack** – use the bundled Gymnasium environment and PPO trainer to develop agents that explore the entire action space, including rerolls, sells, locks, and more.
 
 ## Repository Layout
 
@@ -22,7 +22,8 @@ Welcome to the lovingly rebuilt Deck Battler project. This repository delivers a
 │   ├── game.py              # Game orchestration and serialization helpers
 │   ├── models.py            # Card/unit dataclasses
 │   ├── player.py            # Economy + deck management
-│   └── training.py          # Self-play helpers
+│   ├── rl/                  # Gym environment, PPO trainer, scripted opponents
+│   └── training.py          # High-level PPO training session helpers
 ├── deck-battler-ui/         # Vite + React front-end
 │   ├── index.html
 │   ├── package.json
@@ -107,21 +108,31 @@ Welcome to the lovingly rebuilt Deck Battler project. This repository delivers a
 
 Victory is achieved by reducing the AI’s HP to zero before yours hits zero.
 
-## AI & Self-Play Sandbox
+## Reinforcement Learning Toolkit
 
-The current AI is a deterministic heuristic that focuses on building cohesive sects and levelling when it can afford to. Use `SelfPlaySession` to simulate games:
+The repository now ships with a production-ready reinforcement learning stack:
+
+- **`DeckBattlerEnv`** – a Gymnasium-compatible environment that exposes the full player action space (buy, sell, reroll, level, lock, and end-turn). Action masks are provided every step to eliminate illegal moves.
+- **`RewardConfig`** – granular reward shaping knobs balancing economy management, board development, and combat performance.
+- **`PPOTrainer`** – a battle-tested implementation of Proximal Policy Optimisation with GAE, clipped ratios, entropy regularisation, and gradient norm clipping.
+- **`RLTrainingSession`** – one-line orchestration that wires the environment, scripted opponents, and PPO trainer together.
+
+Example training run:
 
 ```python
-from deck_battler.training import SelfPlaySession
+from deck_battler.training import RLTrainingSession
+from deck_battler.rl import PPOConfig
 
-session = SelfPlaySession(episodes=20)
-results = session.run()
+config = PPOConfig(rollout_steps=1024, total_updates=200)
+session = RLTrainingSession(config=config)
+report = session.train(progress_bar=True)
 
-for idx, result in enumerate(results, start=1):
-    print(f"Episode {idx}: winner={result.winner}, rounds={result.rounds}, damage={result.damage_dealt}")
+print(f"Mean return: {report.mean_return:.2f}")
+print(f"Training history (last 5): {report.history[-5:]}")
+session.save("experiments/ppo_agent.pth")
 ```
 
-This provides a foundation for plugging in reinforcement learning or imitation learning in the future. The modular architecture keeps combat, economy, and card logic isolated, making it straightforward to integrate PPO, population-based training, or curriculum systems down the road.
+The scripted opponent uses the original heuristic agent but gains support for rerolls and shop locks, giving your learning agent a robust sparring partner out of the box.
 
 ## Troubleshooting
 

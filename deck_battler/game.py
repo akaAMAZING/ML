@@ -37,12 +37,21 @@ class GameState:
     # Economy & shop
     # ------------------------------------------------------------------
 
+    def open_shop(self, player_id: int, size: int = 5) -> List[Card]:
+        """Return the current shop, generating a fresh one if empty."""
+
+        existing = self.shops.get(player_id, [])
+        if existing:
+            return existing
+        return self.generate_shop(player_id, size=size)
+
     def generate_shop(self, player_id: int, size: int = 5) -> List[Card]:
         player = self.players[player_id]
         shop = self.card_db.generate_shop(
             player.level, self.active_sects, self.active_legendaries, size=size
         )
         self.shops[player_id] = shop
+        player.unlock_shop()
         return shop
 
     def reroll_shop(self, player_id: int, cost: int = 2) -> Tuple[bool, str]:
@@ -50,6 +59,7 @@ class GameState:
         if player.gold < cost:
             return False, "Not enough gold"
         player.gold -= cost
+        player.unlock_shop()
         self.generate_shop(player_id)
         return True, "Shop refreshed"
 
@@ -70,6 +80,7 @@ class GameState:
         if not success:
             return False, "Deck full", None, []
         player.gold -= card.cost
+        player.unlock_shop()
         del shop[card_idx]
         message = f"Bought {card.name}"
         if merge_events:
@@ -94,6 +105,13 @@ class GameState:
         if player.level_up():
             return True, f"Reached level {player.level}"
         return False, "Cannot level up"
+
+    def lock_shop(self, player_id: int) -> bool:
+        player = self.players[player_id]
+        return player.toggle_shop_lock()
+
+    def unlock_shop(self, player_id: int) -> None:
+        self.players[player_id].unlock_shop()
 
     # ------------------------------------------------------------------
     # Round & combat

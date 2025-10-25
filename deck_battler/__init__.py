@@ -5,7 +5,8 @@ from .combat import CombatEngine
 from .game import GameState
 from .models import Ability, Card, Unit
 from .player import PlayerState
-from .training import SelfPlaySession
+from .training import RLTrainingSession, TrainingReport
+from .rl import DeckBattlerEnv, RewardConfig, PPOConfig, PPOTrainer
 
 __all__ = [
     "Ability",
@@ -16,5 +17,10 @@ __all__ = [
     "CombatEngine",
     "GameState",
     "PlayerState",
-    "SelfPlaySession",
+    "RLTrainingSession",
+    "TrainingReport",
+    "DeckBattlerEnv",
+    "RewardConfig",
+    "PPOConfig",
+    "PPOTrainer",
 ]

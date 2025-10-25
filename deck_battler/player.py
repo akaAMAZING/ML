@@ -16,6 +16,7 @@ class PlayerState:
     deck: List[Unit] = field(default_factory=list)
     bench: List[Unit] = field(default_factory=list)
     collection_inventory: Dict[str, Dict[int, int]] = field(default_factory=dict)
+    shop_locked: bool = False
 
     win_streak: int = 0
     lose_streak: int = 0
@@ -38,6 +39,15 @@ class PlayerState:
         total = base + self.get_interest() + self.get_streak_bonus()
         self.gold += total
         return total
+
+    def toggle_shop_lock(self) -> bool:
+        """Flip the persistent shop lock state."""
+
+        self.shop_locked = not self.shop_locked
+        return self.shop_locked
+
+    def unlock_shop(self) -> None:
+        self.shop_locked = False
 
     def can_level_up(self) -> bool:
         return self.gold >= 4 and self.level < 8
