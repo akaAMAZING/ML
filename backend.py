@@ -83,6 +83,15 @@ class GameManager:
         elif action_type == "reroll":
             success, message = game.reroll_shop(player_id)
             result = {"success": success, "message": message}
+        elif action_type == "strategic":
+            success, message, metadata = game.choose_strategic_option(
+                player_id, action.get("option_idx", -1)
+            )
+            result = {
+                "success": success,
+                "message": message,
+                "metadata": metadata,
+            }
 
         await self.broadcast(
             game_id,

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import random
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 from .cards import CardDatabase
 from .combat import CombatEngine
@@ -10,6 +10,8 @@ from .enums import Sect
 from .models import Card, Unit
 from .player import PlayerState
 from .synergies import summarize_synergies, serialize_synergy_definitions
+from .artifacts import ARTIFACT_INDEX
+from .strategic import StrategicOption, StrategicPlanner
 
 
 class GameState:
@@ -23,6 +25,7 @@ class GameState:
 
         self.card_db = CardDatabase()
         self.combat_engine = CombatEngine()
+        self.strategic_planner = StrategicPlanner()
 
         all_sects = list(Sect)
         self.active_sects = random.sample(all_sects, 4)
@@ -32,6 +35,9 @@ class GameState:
             self.active_legendaries[sect] = random.sample(legends, min(2, len(legends)))
 
         self.shops: Dict[int, List[Card]] = {i: [] for i in range(num_players)}
+        self.strategic_options: Dict[int, List[StrategicOption]] = {
+            i: [] for i in range(num_players)
+        }
 
     # ------------------------------------------------------------------
     # Economy & shop
@@ -48,7 +54,11 @@ class GameState:
     def generate_shop(self, player_id: int, size: int = 5) -> List[Card]:
         player = self.players[player_id]
         shop = self.card_db.generate_shop(
-            player.level, self.active_sects, self.active_legendaries, size=size
+            player.level,
+            self.active_sects,
+            self.active_legendaries,
+            size=size,
+            focus_preferences=player.focus_preferences,
         )
         self.shops[player_id] = shop
         player.unlock_shop()
@@ -56,11 +66,15 @@ class GameState:
 
     def reroll_shop(self, player_id: int, cost: int = 2) -> Tuple[bool, str]:
         player = self.players[player_id]
-        if player.gold < cost:
+        effective_cost = max(0, cost - player.reroll_discount)
+        if player.gold < effective_cost:
             return False, "Not enough gold"
-        player.gold -= cost
+        player.gold -= effective_cost
         player.unlock_shop()
         self.generate_shop(player_id)
+        if effective_cost < cost:
+            discount = cost - effective_cost
+            return True, f"Shop refreshed (saved {discount} gold)"
         return True, "Shop refreshed"
 
     def buy_card(
@@ -119,8 +133,13 @@ class GameState:
 
     def start_round(self) -> None:
         self.current_round += 1
-        for player in self.get_alive_players():
+        for player in self.players:
+            if player.is_eliminated:
+                self.strategic_options[player.player_id] = []
+                continue
+            player.prepare_new_round()
             player.earn_gold()
+        self._prepare_strategic_options()
 
     def run_combat(self, player_a: int = 0, player_b: int = 1) -> Tuple[int, int]:
         deck_a = self.players[player_a].deck
@@ -160,6 +179,175 @@ class GameState:
 
     def get_alive_players(self) -> List[PlayerState]:
         return [p for p in self.players if not p.is_eliminated]
+
+    # ------------------------------------------------------------------
+    # Strategic options
+    # ------------------------------------------------------------------
+
+    def _prepare_strategic_options(self) -> None:
+        for player in self.get_alive_players():
+            options = self.strategic_planner.generate_options(
+                player, list(self.active_sects)
+            )
+            self.strategic_options[player.player_id] = options
+
+    def get_strategic_options(self, player_id: int) -> List[StrategicOption]:
+        return self.strategic_options.get(player_id, [])
+
+    def choose_strategic_option(
+        self, player_id: int, option_idx: int
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        player = self.players[player_id]
+        options = self.get_strategic_options(player_id)
+        if player.is_eliminated:
+            return False, "Player eliminated", {}
+        if not player.strategic_choice_available:
+            return False, "Strategic choice already used", {}
+        if not (0 <= option_idx < len(options)):
+            return False, "Invalid strategic option", {}
+        option = options[option_idx]
+        if player.gold < option.cost:
+            return False, "Not enough gold", {"option_type": option.option_type}
+
+        player.gold -= option.cost
+        player.strategic_choice_available = False
+        metadata: Dict[str, Any] = {"option_type": option.option_type}
+        if option.option_type == "focus":
+            message, meta = self._apply_focus_option(player, option)
+        elif option.option_type == "training":
+            message, meta = self._apply_training_option(player, option)
+        elif option.option_type == "artifact":
+            message, meta = self._apply_artifact_option(player, option)
+        elif option.option_type == "expedition":
+            message, meta = self._apply_expedition_option(player, option)
+        else:
+            message, meta = "Nothing happens", {}
+        metadata.update(meta)
+        return True, message, metadata
+
+    def _apply_focus_option(
+        self, player: PlayerState, option: StrategicOption
+    ) -> Tuple[str, Dict[str, Any]]:
+        sect = option.payload["sect"]
+        duration = option.payload.get("duration", 3)
+        player.add_focus(sect, duration)
+        final_duration = player.focus_preferences.get(sect, duration)
+        return (
+            f"Research teams prioritize {sect.value} for {final_duration} rounds.",
+            {"focus_value": final_duration},
+        )
+
+    def _apply_training_option(
+        self, player: PlayerState, option: StrategicOption
+    ) -> Tuple[str, Dict[str, Any]]:
+        sect = option.payload["sect"]
+        stat = option.payload["stat"]
+        amount = option.payload["amount"] + player.training_bonus
+        units = [unit for unit in player.deck if unit.sect == sect]
+        if not units:
+            return (
+                "Training camp sat empty—no units of that sect to benefit.",
+                {"training_applied": 0, "failed": True},
+            )
+
+        affected = 0
+        for unit in units:
+            if stat == "atk":
+                unit.atk += amount
+            elif stat == "hp":
+                unit.max_hp += amount
+                unit.hp = min(unit.hp + amount, unit.max_hp)
+            elif stat == "speed":
+                unit.speed += amount
+            affected += 1
+
+        return (
+            f"{affected} {sect.value} units completed elite {stat.upper()} drills.",
+            {"training_applied": affected, "amount": amount},
+        )
+
+    def _apply_artifact_option(
+        self, player: PlayerState, option: StrategicOption
+    ) -> Tuple[str, Dict[str, Any]]:
+        artifact = option.payload["artifact"]
+        effect_summary = player.add_artifact(artifact)
+        return (
+            f"Recovered {artifact.name}: {effect_summary}",
+            {"artifact": artifact.id, "power": artifact.power},
+        )
+
+    def _apply_expedition_option(
+        self, player: PlayerState, option: StrategicOption
+    ) -> Tuple[str, Dict[str, Any]]:
+        risk = option.payload["risk"]
+        reward_type = option.payload["reward"]
+        base_chance = option.payload["success_chance"]
+        safety = min(0.95, base_chance + player.expedition_safety * 0.05)
+        roll = random.random()
+        metadata: Dict[str, Any] = {
+            "expedition_roll": roll,
+            "risk": risk,
+            "reward_type": reward_type,
+        }
+        if roll <= safety:
+            metadata["expedition_success"] = True
+            message = self._resolve_expedition_success(player, option, metadata)
+        else:
+            metadata["expedition_success"] = False
+            damage = max(1, risk - player.expedition_safety)
+            player.take_damage(damage)
+            metadata["damage"] = damage
+            message = f"Expedition ambushed! You lost {damage} HP."
+        return message, metadata
+
+    def _resolve_expedition_success(
+        self, player: PlayerState, option: StrategicOption, metadata: Dict[str, Any]
+    ) -> str:
+        reward_type = option.payload["reward"]
+        reward_value = option.payload.get("reward_value", 0)
+        sect = option.payload["sect"]
+        if reward_type == "gold":
+            player.gold += reward_value
+            metadata["gold_gain"] = reward_value
+            return f"Expedition returns with {reward_value} gold in spoils!"
+        if reward_type == "card":
+            rarity = option.payload.get("rarity")
+            pool = [
+                card
+                for card in self.card_db.all_cards
+                if card.sect == sect
+                and (rarity is None or card.rarity.tier >= rarity.tier)
+            ]
+            if not pool:
+                pool = [card for card in self.card_db.all_cards if card.sect == sect]
+            reward_card = random.choice(pool)
+            unit = reward_card.create_unit() if reward_card.create_unit else None
+            if unit:
+                success, events = player.add_to_deck(unit)
+                metadata["card_added"] = reward_card.name
+                metadata["merge_events"] = events
+                if not success:
+                    self.shops.setdefault(player.player_id, [])
+                    self.shops[player.player_id].append(reward_card)
+                    return (
+                        f"No room on the board—{reward_card.name} was stored in the shop."
+                    )
+                return f"Recruited expedition veteran {reward_card.name}!"
+            return "Expedition returned with blueprints but no recruit."
+        if reward_type == "training":
+            amount = reward_value or 10
+            fake_option = StrategicOption(
+                id="expedition_training",
+                name="Field Lessons",
+                description="",
+                cost=0,
+                option_type="training",
+                payload={"sect": sect, "stat": "atk", "amount": amount},
+            )
+            message, extra = self._apply_training_option(player, fake_option)
+            metadata.update(extra)
+            return f"Field lessons inspire the troops. {message}"
+        return "Expedition succeeded but yielded no tangible reward."
 
     # ------------------------------------------------------------------
     # Serialization helpers for API/frontend
@@ -207,6 +395,24 @@ class GameState:
             "streak_bonus": player.get_streak_bonus(),
             "collection_inventory": player.get_collection_inventory(),
             "synergies": summarize_synergies(player.deck, tracked_sects),
+            "focus_preferences": {
+                sect.value: value for sect, value in player.focus_preferences.items()
+            },
+            "artifacts": [
+                ARTIFACT_INDEX[artifact_id].name
+                if artifact_id in ARTIFACT_INDEX
+                else artifact_id
+                for artifact_id in player.artifacts
+            ],
+            "economy_bonus": player.economy_bonus,
+            "reroll_discount": player.reroll_discount,
+            "training_bonus": player.training_bonus,
+            "expedition_safety": player.expedition_safety,
+            "focus_duration_bonus": player.focus_duration_bonus,
+            "strategic_choice_available": player.strategic_choice_available,
+            "strategic_options": [
+                option.serialize() for option in self.get_strategic_options(player.player_id)
+            ],
         }
 
     def to_public_dict(self) -> Dict:

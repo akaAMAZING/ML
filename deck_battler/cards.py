@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import random
 from collections import defaultdict
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from .enums import CardType, Rarity, Sect, StatusEffect, TriggerType
 from .models import Ability, Card, Unit
@@ -1042,7 +1042,14 @@ class CardDatabase:
     # Shop generation
     # ------------------------------------------------------------------
 
-    def generate_shop(self, level: int, active_sects: List[Sect], active_legendaries: Dict[Sect, List[Card]], size: int = 5) -> List[Card]:
+    def generate_shop(
+        self,
+        level: int,
+        active_sects: List[Sect],
+        active_legendaries: Dict[Sect, List[Card]],
+        size: int = 5,
+        focus_preferences: Optional[Dict[Sect, int]] = None,
+    ) -> List[Card]:
         odds = {
             1: {Rarity.COMMON: 0.75, Rarity.UNCOMMON: 0.2, Rarity.RARE: 0.05},
             2: {Rarity.COMMON: 0.7, Rarity.UNCOMMON: 0.25, Rarity.RARE: 0.05},
@@ -1067,12 +1074,17 @@ class CardDatabase:
                 sect = random.choice(active_sects)
                 candidates = active_legendaries.get(sect, [])
                 if candidates:
-                    shop.append(random.choice(candidates))
+                    weights = [
+                        1 + (focus_preferences or {}).get(card.sect, 0)
+                        for card in candidates
+                    ]
+                    shop.append(random.choices(candidates, weights=weights)[0])
                     continue
 
             rarity_pool = [c for c in available_cards if c.rarity == selected_rarity]
             if rarity_pool:
-                shop.append(random.choice(rarity_pool))
+                weights = [1 + (focus_preferences or {}).get(card.sect, 0) for card in rarity_pool]
+                shop.append(random.choices(rarity_pool, weights=weights)[0])
 
         while len(shop) < size:
             shop.append(random.choice(available_cards))
