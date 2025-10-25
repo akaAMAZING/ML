@@ -68,8 +68,10 @@ class GameManager:
         result: Dict[str, Any] = {"success": False, "message": "Unknown action"}
 
         if action_type == "buy":
-            success, message, card = game.buy_card(player_id, action.get("card_idx", -1))
+            success, message, card, events = game.buy_card(player_id, action.get("card_idx", -1))
             result = {"success": success, "message": message}
+            if events:
+                result["fusion_events"] = events
             if card:
                 result["card"] = game.serialize_card(card)
         elif action_type == "sell":

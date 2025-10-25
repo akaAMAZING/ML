@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List
+from typing import Dict, List
 
 from .models import Unit
 
@@ -15,6 +15,7 @@ class PlayerState:
     level: int = 1
     deck: List[Unit] = field(default_factory=list)
     bench: List[Unit] = field(default_factory=list)
+    collection_inventory: Dict[str, Dict[int, int]] = field(default_factory=dict)
 
     win_streak: int = 0
     lose_streak: int = 0
@@ -55,13 +56,78 @@ class PlayerState:
             self.hp = 0
             self.is_eliminated = True
 
-    def add_to_deck(self, unit: Unit) -> bool:
-        if len(self.deck) < self.get_max_deck_size():
-            self.deck.append(unit)
-            return True
-        return False
+    def add_to_deck(self, unit: Unit) -> tuple[bool, List[Dict[str, int]]]:
+        """Add a unit to the deck and attempt automatic merges."""
+
+        merge_events: List[Dict[str, int]] = []
+        duplicates = [u for u in self.deck if u.name == unit.name and u.star_level == unit.star_level]
+        if len(self.deck) >= self.get_max_deck_size() and len(duplicates) < 2:
+            return False, merge_events
+
+        self.deck.append(unit)
+        self._increment_inventory(unit)
+        merge_events.extend(self._attempt_merge(unit))
+        return True, merge_events
 
     def remove_from_deck(self, idx: int) -> Unit | None:
         if 0 <= idx < len(self.deck):
-            return self.deck.pop(idx)
+            unit = self.deck.pop(idx)
+            self._decrement_inventory(unit.name, unit.star_level)
+            return unit
         return None
+
+    # ------------------------------------------------------------------
+    # Collection helpers
+    # ------------------------------------------------------------------
+
+    def _increment_inventory(self, unit: Unit) -> None:
+        star_counts = self.collection_inventory.setdefault(unit.name, {})
+        star_counts[unit.star_level] = star_counts.get(unit.star_level, 0) + 1
+
+    def _decrement_inventory(self, name: str, star_level: int, amount: int = 1) -> None:
+        star_counts = self.collection_inventory.get(name)
+        if not star_counts:
+            return
+        star_counts[star_level] = max(0, star_counts.get(star_level, 0) - amount)
+        if star_counts[star_level] <= 0:
+            star_counts.pop(star_level, None)
+        if not star_counts:
+            self.collection_inventory.pop(name, None)
+
+    def _remove_unit_instance(self, unit: Unit) -> None:
+        if unit in self.deck:
+            self.deck.remove(unit)
+        self._decrement_inventory(unit.name, unit.star_level)
+
+    def _attempt_merge(self, unit: Unit) -> List[Dict[str, int]]:
+        events: List[Dict[str, int]] = []
+        current_unit = unit
+
+        while True:
+            if current_unit.star_level >= 3:
+                break
+            same_units = [u for u in self.deck if u.name == current_unit.name and u.star_level == current_unit.star_level]
+            if len(same_units) < 3:
+                break
+
+            consumed = same_units[:3]
+            for consumed_unit in consumed:
+                self._remove_unit_instance(consumed_unit)
+
+            template = consumed[0].copy()
+            template.refresh_state()
+            template.promote()
+
+            self.deck.append(template)
+            self._increment_inventory(template)
+            events.append({"star_level": template.star_level, "name": template.name})
+
+            current_unit = template
+
+        return events
+
+    def get_collection_inventory(self) -> Dict[str, Dict[str, int]]:
+        return {
+            name: {str(star): count for star, count in sorted(star_counts.items())}
+            for name, star_counts in self.collection_inventory.items()
+        }

@@ -6,6 +6,7 @@ from typing import List, Tuple
 
 from .enums import Sect, Rarity, TriggerType, StatusEffect
 from .models import Unit
+from .synergies import apply_synergy_effects
 
 
 class CombatEngine:
@@ -18,6 +19,8 @@ class CombatEngine:
         self.team_a: List[Unit] = []
         self.team_b: List[Unit] = []
         self.has_grace = False
+        self.synergy_levels_a = {}
+        self.synergy_levels_b = {}
 
     def simulate_combat(self, deck_a: List[Unit], deck_b: List[Unit]) -> Tuple[bool, int]:
         """Simulate combat between the two decks."""
@@ -25,6 +28,8 @@ class CombatEngine:
         self.team_b = [u.copy() for u in deck_b]
         self.current_tick = 0
         self.has_grace = False
+        self.synergy_levels_a = apply_synergy_effects(self.team_a, self.team_b)
+        self.synergy_levels_b = apply_synergy_effects(self.team_b, self.team_a)
 
         self._trigger_abilities(TriggerType.COMBAT_START)
 
