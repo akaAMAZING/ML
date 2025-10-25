@@ -9,6 +9,7 @@ from .combat import CombatEngine
 from .enums import Sect
 from .models import Card, Unit
 from .player import PlayerState
+from .synergies import summarize_synergies, serialize_synergy_definitions
 
 
 class GameState:
@@ -52,22 +53,32 @@ class GameState:
         self.generate_shop(player_id)
         return True, "Shop refreshed"
 
-    def buy_card(self, player_id: int, card_idx: int) -> Tuple[bool, str, Card | None]:
+    def buy_card(
+        self, player_id: int, card_idx: int
+    ) -> Tuple[bool, str, Card | None, List[Dict[str, int]]]:
         player = self.players[player_id]
         shop = self.shops.get(player_id) or []
         if not (0 <= card_idx < len(shop)):
-            return False, "Invalid card", None
+            return False, "Invalid card", None, []
         card = shop[card_idx]
         if player.gold < card.cost:
-            return False, "Not enough gold", None
+            return False, "Not enough gold", None, []
         if not card.create_unit:
-            return False, "Card cannot be purchased", None
+            return False, "Card cannot be purchased", None, []
         unit = card.create_unit()
-        if not player.add_to_deck(unit):
-            return False, "Deck full", None
+        success, merge_events = player.add_to_deck(unit)
+        if not success:
+            return False, "Deck full", None, []
         player.gold -= card.cost
         del shop[card_idx]
-        return True, f"Bought {card.name}", card
+        message = f"Bought {card.name}"
+        if merge_events:
+            upgrades = ", ".join(
+                f"{event['name']} ascended to ★{event['star_level']}"
+                for event in merge_events
+            )
+            message = f"{message} · {upgrades}"
+        return True, message, card, merge_events
 
     def sell_unit(self, player_id: int, deck_idx: int) -> Tuple[bool, str, int]:
         player = self.players[player_id]
@@ -164,6 +175,7 @@ class GameState:
         }
 
     def serialize_player(self, player: PlayerState) -> Dict:
+        tracked_sects = list(dict.fromkeys(list(self.active_sects) + [unit.sect for unit in player.deck]))
         return {
             "player_id": player.player_id,
             "hp": player.hp,
@@ -175,6 +187,8 @@ class GameState:
             "max_deck_size": player.get_max_deck_size(),
             "interest": player.get_interest(),
             "streak_bonus": player.get_streak_bonus(),
+            "collection_inventory": player.get_collection_inventory(),
+            "synergies": summarize_synergies(player.deck, tracked_sects),
         }
 
     def to_public_dict(self) -> Dict:
@@ -184,6 +198,7 @@ class GameState:
             "max_rounds": self.max_rounds,
             "is_game_over": self.is_game_over(),
             "active_sects": [sect.value for sect in self.active_sects],
+            "synergy_definitions": serialize_synergy_definitions(self.active_sects),
             "active_legendaries": {
                 sect.value: [self.serialize_card(card) for card in cards]
                 for sect, cards in self.active_legendaries.items()

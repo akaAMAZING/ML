@@ -45,13 +45,20 @@ class Unit:
     damage_taken: float = 0.0
     kills: int = 0
 
+    base_hp: float = field(init=False)
+    base_max_hp: float = field(init=False)
+    base_atk: float = field(init=False)
+    base_defense: float = field(init=False)
+    base_speed: float = field(init=False)
+
     def __post_init__(self) -> None:
-        if self.star_level > 1:
-            multiplier = 1.0 + (self.star_level - 1) * 0.5
-            self.hp *= multiplier
-            self.max_hp *= multiplier
-            self.atk *= multiplier
-            self.defense *= multiplier
+        multiplier = 1.0 + (self.star_level - 1) * 0.5
+        self.base_hp = self.hp / multiplier if multiplier else self.hp
+        self.base_max_hp = self.max_hp / multiplier if multiplier else self.max_hp
+        self.base_atk = self.atk / multiplier if multiplier else self.atk
+        self.base_defense = self.defense / multiplier if multiplier else self.defense
+        self.base_speed = self.speed
+        self._apply_star_scaling()
 
     def take_damage(self, damage: float) -> float:
         if damage < 0:
@@ -75,6 +82,29 @@ class Unit:
         from copy import deepcopy
 
         return deepcopy(self)
+
+    def promote(self) -> None:
+        """Increase the star level of the unit and rescale its stats."""
+        self.star_level += 1
+        self._apply_star_scaling()
+        self.refresh_state()
+
+    def refresh_state(self) -> None:
+        """Reset transient combat fields such as health, statuses and counters."""
+        self.hp = self.max_hp
+        self.is_alive = True
+        self.status_effects.clear()
+        self.damage_dealt = 0.0
+        self.damage_taken = 0.0
+        self.kills = 0
+
+    def _apply_star_scaling(self) -> None:
+        multiplier = 1.0 + (self.star_level - 1) * 0.5
+        self.max_hp = self.base_max_hp * multiplier
+        self.hp = self.max_hp
+        self.atk = self.base_atk * multiplier
+        self.defense = self.base_defense * multiplier
+        self.speed = self.base_speed
 
 
 @dataclass
