@@ -13,15 +13,18 @@ from ..game import GameState
 from ..models import Card, Unit
 from ..player import PlayerState
 from ..synergies import get_synergy_levels
+from ..strategic import StrategicOption
 from .opponents import ScriptedOpponent, TrainingOpponent
 
 
 MAX_SHOP_SIZE = 5
 MAX_DECK_SIZE = 10
+MAX_STRATEGIC_OPTIONS = 3
 _CARD_FEATURES = 8
 _UNIT_FEATURES = 9
-_PLAYER_FEATURES = 8
+_PLAYER_FEATURES = 15
 _SYNERGY_FEATURES = len(list(Sect))
+_STRATEGIC_FEATURES = 5
 
 
 @dataclass
@@ -34,6 +37,12 @@ class RewardConfig:
     reroll_penalty: float = -0.01
     level_reward: float = 0.08
     lock_reward: float = 0.0
+    strategic_reward: float = 0.1
+    focus_reward: float = 0.05
+    training_reward: float = 0.12
+    artifact_reward: float = 0.18
+    expedition_success_bonus: float = 0.25
+    expedition_failure_penalty: float = -0.15
     invalid_action_penalty: float = -0.1
     failed_action_penalty: float = -0.05
     gold_scale: float = 0.01
@@ -73,6 +82,7 @@ class DeckBattlerEnv(gym.Env):
             + MAX_DECK_SIZE * _UNIT_FEATURES
             + _PLAYER_FEATURES * 2
             + _SYNERGY_FEATURES * 2
+            + MAX_STRATEGIC_OPTIONS * _STRATEGIC_FEATURES
             + 2
         )
         self.observation_space = spaces.Box(
@@ -85,7 +95,8 @@ class DeckBattlerEnv(gym.Env):
         self.level_index = self.reroll_index + 1
         self.lock_index = self.level_index + 1
         self.end_turn_index = self.lock_index + 1
-        self.action_space = spaces.Discrete(self.end_turn_index + 1)
+        self.strategic_offset = self.end_turn_index + 1
+        self.action_space = spaces.Discrete(self.strategic_offset + MAX_STRATEGIC_OPTIONS)
 
     # ------------------------------------------------------------------
     # Gym API
@@ -136,6 +147,9 @@ class DeckBattlerEnv(gym.Env):
         elif action == self.end_turn_index:
             round_reward, terminated = self._resolve_round()
             reward += round_reward
+        elif action < self.action_space.n:
+            option_idx = action - self.strategic_offset
+            reward += self._handle_strategic(option_idx, info)
 
         self.prev_board_value = self._board_value(self.player)
         observation = self._build_observation()
@@ -190,6 +204,37 @@ class DeckBattlerEnv(gym.Env):
             return 0.0
         self.game.lock_shop(0)
         return self.reward_config.lock_reward
+
+    def _handle_strategic(self, option_idx: int, info: Dict[str, object]) -> float:
+        if self.game is None:
+            return 0.0
+        success, message, metadata = self.game.choose_strategic_option(0, option_idx)
+        metadata = metadata or {}
+        metadata["message"] = message
+        metadata["option_index"] = option_idx
+        info["strategic_outcome"] = metadata
+        if not success:
+            info["strategic_failed"] = True
+            return self.reward_config.failed_action_penalty
+
+        reward = self.reward_config.strategic_reward
+        option_type = metadata.get("option_type")
+        if option_type == "focus":
+            reward += self.reward_config.focus_reward
+        elif option_type == "training":
+            reward += self.reward_config.training_reward
+            if metadata.get("failed"):
+                reward += self.reward_config.failed_action_penalty
+        elif option_type == "artifact":
+            reward += self.reward_config.artifact_reward
+        elif option_type == "expedition":
+            if metadata.get("expedition_success"):
+                reward += self.reward_config.expedition_success_bonus
+            else:
+                reward += self.reward_config.expedition_failure_penalty
+
+        reward += metadata.get("gold_gain", 0) * self.reward_config.gold_scale
+        return reward + self._board_delta_reward()
 
     def _resolve_round(self) -> Tuple[float, bool]:
         if self.game is None:
@@ -272,6 +317,11 @@ class DeckBattlerEnv(gym.Env):
         features.extend(self._encode_synergies(player.deck))
         features.extend(self._encode_synergies(opponent.deck))
 
+        options = self.game.get_strategic_options(0) if self.game else []
+        for idx in range(MAX_STRATEGIC_OPTIONS):
+            option = options[idx] if idx < len(options) else None
+            features.extend(self._encode_option(option, player))
+
         round_progress = self.game.current_round if self.game else 0
         features.append(round_progress / self.max_rounds)
         features.append(len(player.deck) / MAX_DECK_SIZE)
@@ -314,6 +364,7 @@ class DeckBattlerEnv(gym.Env):
         ]
 
     def _encode_player(self, player: PlayerState) -> List[float]:
+        focus_total = sum(player.focus_preferences.values())
         return [
             player.hp / 100,
             player.gold / 100,
@@ -323,7 +374,67 @@ class DeckBattlerEnv(gym.Env):
             player.lose_streak / 10,
             1.0 if player.shop_locked else 0.0,
             len(player.deck) / MAX_DECK_SIZE,
+            player.economy_bonus / 10,
+            player.reroll_discount / 5,
+            focus_total / 10,
+            player.training_bonus / 10,
+            player.expedition_safety / 10,
+            len(player.artifacts) / 10,
+            1.0 if player.strategic_choice_available else 0.0,
         ]
+
+    def _encode_option(
+        self, option: Optional[StrategicOption], player: PlayerState
+    ) -> List[float]:
+        if option is None:
+            return [0.0] * _STRATEGIC_FEATURES
+        type_map = {"focus": 0.0, "training": 1.0, "artifact": 2.0, "expedition": 3.0}
+        option_type = type_map.get(option.option_type, 0.0) / 3.0
+        cost = option.cost / 10.0
+        if option.option_type == "focus":
+            sect = option.payload.get("sect")
+            duration = option.payload.get("duration", 0) + player.focus_duration_bonus
+            sect_idx = 0.0
+            if sect is not None:
+                sect_idx = self._sect_to_idx[sect] / max(1, len(self._sect_to_idx) - 1)
+            return [option_type, cost, sect_idx, duration / 6.0, 0.0]
+        if option.option_type == "training":
+            sect = option.payload.get("sect")
+            stat = option.payload.get("stat", "atk")
+            amount = option.payload.get("amount", 0)
+            stat_map = {"atk": 0.0, "hp": 0.5, "speed": 1.0}
+            sect_idx = 0.0
+            if sect is not None:
+                sect_idx = self._sect_to_idx[sect] / max(1, len(self._sect_to_idx) - 1)
+            return [
+                option_type,
+                cost,
+                sect_idx,
+                stat_map.get(stat, 0.0),
+                amount / 30.0,
+            ]
+        if option.option_type == "artifact":
+            artifact = option.payload.get("artifact")
+            power = getattr(artifact, "power", 1)
+            return [
+                option_type,
+                cost,
+                power / 5.0,
+                len(player.artifacts) / 10.0,
+                0.0,
+            ]
+        if option.option_type == "expedition":
+            risk = option.payload.get("risk", 0)
+            success = option.payload.get("success_chance", 0.5)
+            reward_value = option.payload.get("reward_value", 0)
+            return [
+                option_type,
+                cost,
+                risk / 12.0,
+                success,
+                reward_value / 20.0,
+            ]
+        return [option_type, cost, 0.0, 0.0, 0.0]
 
     def _encode_synergies(self, units: List[Unit]) -> List[float]:
         levels = get_synergy_levels(units)
@@ -356,6 +467,17 @@ class DeckBattlerEnv(gym.Env):
         mask[self.level_index] = 1 if player.can_level_up() else 0
         mask[self.lock_index] = 1
         mask[self.end_turn_index] = 1
+        options = self.game.get_strategic_options(0)
+        for idx in range(MAX_STRATEGIC_OPTIONS):
+            action_idx = self.strategic_offset + idx
+            if (
+                idx < len(options)
+                and player.strategic_choice_available
+                and player.gold >= options[idx].cost
+            ):
+                mask[action_idx] = 1
+            else:
+                mask[action_idx] = 0
         return mask
 
     def _can_add_card(self, player: PlayerState, card: Card) -> bool:
@@ -373,6 +495,7 @@ class DeckBattlerEnv(gym.Env):
 
     def _board_value(self, player: PlayerState) -> float:
         value = float(player.gold) * 2.0
+        value += player.economy_bonus * 12.0
         for unit in player.deck:
             value += unit.max_hp * 0.25
             value += unit.atk * 1.5
@@ -380,6 +503,10 @@ class DeckBattlerEnv(gym.Env):
             value += unit.star_level * 15.0
         synergy_levels = get_synergy_levels(player.deck)
         value += sum(level * 30.0 for level in synergy_levels.values())
+        value += sum(player.focus_preferences.values()) * 8.0
+        value += player.training_bonus * 15.0
+        value += len(player.artifacts) * 40.0
+        value += player.expedition_safety * 5.0
         return value
 
     def _execute_opponent_action(self, action: Dict[str, int | str]) -> None:

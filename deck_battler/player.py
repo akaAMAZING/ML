@@ -2,9 +2,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, TYPE_CHECKING
 
+from .enums import Sect
 from .models import Unit
+
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .artifacts import Artifact
 
 
 @dataclass
@@ -17,6 +22,15 @@ class PlayerState:
     bench: List[Unit] = field(default_factory=list)
     collection_inventory: Dict[str, Dict[int, int]] = field(default_factory=dict)
     shop_locked: bool = False
+
+    focus_preferences: Dict[Sect, int] = field(default_factory=dict)
+    focus_duration_bonus: int = 0
+    training_bonus: int = 0
+    expedition_safety: int = 0
+    economy_bonus: int = 0
+    reroll_discount: int = 0
+    artifacts: List[str] = field(default_factory=list)
+    strategic_choice_available: bool = False
 
     win_streak: int = 0
     lose_streak: int = 0
@@ -36,9 +50,15 @@ class PlayerState:
         return min(3, max(self.win_streak, self.lose_streak))
 
     def earn_gold(self, base: int = 5) -> int:
-        total = base + self.get_interest() + self.get_streak_bonus()
+        total = base + self.get_interest() + self.get_streak_bonus() + self.economy_bonus
         self.gold += total
         return total
+
+    def prepare_new_round(self) -> None:
+        """Reset transient round state and decay focus timers."""
+
+        self.strategic_choice_available = True
+        self.decay_focus_preferences()
 
     def toggle_shop_lock(self) -> bool:
         """Flip the persistent shop lock state."""
@@ -74,6 +94,7 @@ class PlayerState:
         if len(self.deck) >= self.get_max_deck_size() and len(duplicates) < 2:
             return False, merge_events
 
+        self.apply_passives(unit)
         self.deck.append(unit)
         self._increment_inventory(unit)
         merge_events.extend(self._attempt_merge(unit))
@@ -128,6 +149,8 @@ class PlayerState:
             template.refresh_state()
             template.promote()
 
+            self.apply_passives(template)
+
             self.deck.append(template)
             self._increment_inventory(template)
             events.append({"star_level": template.star_level, "name": template.name})
@@ -135,6 +158,38 @@ class PlayerState:
             current_unit = template
 
         return events
+
+    # ------------------------------------------------------------------
+    # Strategic systems
+    # ------------------------------------------------------------------
+
+    def decay_focus_preferences(self) -> None:
+        expired: List[Sect] = []
+        for sect, remaining in list(self.focus_preferences.items()):
+            new_value = remaining - 1
+            if new_value <= 0:
+                expired.append(sect)
+            else:
+                self.focus_preferences[sect] = new_value
+        for sect in expired:
+            self.focus_preferences.pop(sect, None)
+
+    def add_focus(self, sect: Sect, duration: int) -> None:
+        enhanced = duration + self.focus_duration_bonus
+        current = self.focus_preferences.get(sect, 0)
+        self.focus_preferences[sect] = max(current, enhanced)
+
+    def add_artifact(self, artifact: "Artifact") -> str:
+        self.artifacts.append(artifact.id)
+        return artifact.apply(self)
+
+    def apply_passives(self, unit: Unit) -> None:
+        """Apply persistent bonuses from artifacts or focus systems."""
+
+        if self.training_bonus:
+            unit.atk += self.training_bonus
+            unit.max_hp += self.training_bonus * 2
+            unit.hp = min(unit.hp + self.training_bonus * 2, unit.max_hp)
 
     def get_collection_inventory(self) -> Dict[str, Dict[str, int]]:
         return {
