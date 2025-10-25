@@ -145,13 +145,25 @@ class GameState:
         deck_a = self.players[player_a].deck
         deck_b = self.players[player_b].deck
         if not deck_a and not deck_b:
+            for player in self.players:
+                player.resolve_combat_end()
             return player_a, 0
-        if not deck_a:
-            winner, loser, damage = player_b, player_a, 5
+        elif not deck_a:
+            winner, loser = player_b, player_a
+            modifier = self.players[winner].get_combat_modifiers()
+            bonus = int(modifier.get("damage_bonus", 0))
+            damage = max(1, 5 + bonus)
         elif not deck_b:
-            winner, loser, damage = player_a, player_b, 5
+            winner, loser = player_a, player_b
+            modifier = self.players[winner].get_combat_modifiers()
+            bonus = int(modifier.get("damage_bonus", 0))
+            damage = max(1, 5 + bonus)
         else:
-            won, damage = self.combat_engine.simulate_combat(deck_a, deck_b)
+            modifiers_a = self.players[player_a].get_combat_modifiers()
+            modifiers_b = self.players[player_b].get_combat_modifiers()
+            won, damage = self.combat_engine.simulate_combat(
+                deck_a, deck_b, modifiers_a, modifiers_b
+            )
             winner = player_a if won else player_b
             loser = player_b if won else player_a
         self._apply_combat_results(winner, loser, damage)
@@ -164,14 +176,17 @@ class GameState:
         win_player.win_streak += 1
         win_player.lose_streak = 0
         win_player.total_damage_dealt += damage
+        win_player.adjust_morale(4 + win_player.win_streak // 2)
 
         lose_player.take_damage(damage)
         lose_player.win_streak = 0
         lose_player.lose_streak += 1
+        lose_player.adjust_morale(-3 - lose_player.lose_streak // 2)
 
         for player in self.players:
             if not player.is_eliminated:
                 player.rounds_survived += 1
+            player.resolve_combat_end()
 
     def is_game_over(self) -> bool:
         alive = sum(1 for p in self.players if not p.is_eliminated)
@@ -206,12 +221,18 @@ class GameState:
         if not (0 <= option_idx < len(options)):
             return False, "Invalid strategic option", {}
         option = options[option_idx]
+        morale_cost = option.payload.get("morale_cost", 0)
         if player.gold < option.cost:
             return False, "Not enough gold", {"option_type": option.option_type}
+        if player.morale < morale_cost:
+            return False, "Not enough morale", {"option_type": option.option_type, "morale_cost": morale_cost}
 
         player.gold -= option.cost
         player.strategic_choice_available = False
-        metadata: Dict[str, Any] = {"option_type": option.option_type}
+        metadata: Dict[str, Any] = {
+            "option_type": option.option_type,
+            "morale_spent": 0,
+        }
         if option.option_type == "focus":
             message, meta = self._apply_focus_option(player, option)
         elif option.option_type == "training":
@@ -220,8 +241,13 @@ class GameState:
             message, meta = self._apply_artifact_option(player, option)
         elif option.option_type == "expedition":
             message, meta = self._apply_expedition_option(player, option)
+        elif option.option_type == "tactic":
+            message, meta = self._apply_tactic_option(player, option, morale_cost)
         else:
             message, meta = "Nothing happens", {}
+        if morale_cost and option.option_type != "tactic":
+            player.adjust_morale(-morale_cost)
+            metadata["morale_spent"] = morale_cost
         metadata.update(meta)
         return True, message, metadata
 
@@ -275,6 +301,42 @@ class GameState:
             f"Recovered {artifact.name}: {effect_summary}",
             {"artifact": artifact.id, "power": artifact.power},
         )
+
+    def _apply_tactic_option(
+        self, player: PlayerState, option: StrategicOption, morale_cost: int
+    ) -> Tuple[str, Dict[str, Any]]:
+        payload = option.payload
+        tactic_id = payload.get("id", option.id)
+        attack_bonus = float(payload.get("attack_bonus", 0.0))
+        defense_bonus = float(payload.get("defense_bonus", 0.0))
+        speed_bonus = float(payload.get("speed_bonus", 0.0))
+        damage_bonus = int(payload.get("damage_bonus", 0))
+        duration = int(payload.get("duration", 1))
+        label = payload.get("label", option.name)
+
+        player.activate_tactic(
+            tactic_id,
+            attack_bonus=attack_bonus,
+            defense_bonus=defense_bonus,
+            speed_bonus=speed_bonus,
+            damage_bonus=damage_bonus,
+            duration=duration,
+            morale_cost=morale_cost,
+        )
+        message = (
+            f"Battle plan '{label}' enacted for {duration} round(s)."
+            if duration
+            else f"Battle plan '{label}' enacted."
+        )
+        return message, {
+            "tactic": label,
+            "tactic_rounds": duration,
+            "attack_bonus": attack_bonus,
+            "defense_bonus": defense_bonus,
+            "speed_bonus": speed_bonus,
+            "damage_bonus": damage_bonus,
+            "morale_spent": morale_cost,
+        }
 
     def _apply_expedition_option(
         self, player: PlayerState, option: StrategicOption
@@ -409,6 +471,9 @@ class GameState:
             "training_bonus": player.training_bonus,
             "expedition_safety": player.expedition_safety,
             "focus_duration_bonus": player.focus_duration_bonus,
+            "morale": player.morale,
+            "max_morale": player.max_morale,
+            "active_tactic": player.serialize_tactic(),
             "strategic_choice_available": player.strategic_choice_available,
             "strategic_options": [
                 option.serialize() for option in self.get_strategic_options(player.player_id)
