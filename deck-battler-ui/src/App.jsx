@@ -114,6 +114,14 @@ export default function DeckBattlerApp() {
   const [combatLog, setCombatLog] = useState([]);
   const wsRef = useRef(null);
 
+  const updateStateFromServer = (state) => {
+    setGameState(state);
+    if (state?.shops) {
+      const playerShop = state.shops["0"] || state.shops[0] || [];
+      setShop(playerShop);
+    }
+  };
+
   // Create new game
   const createGame = async () => {
     try {
@@ -124,11 +132,8 @@ export default function DeckBattlerApp() {
       });
       const data = await response.json();
       setGameId(data.game_id);
-      setGameState(data.game_state);
+      updateStateFromServer(data.game_state);
       connectWebSocket(data.game_id);
-      
-      // Generate initial shop
-      await generateShop(data.game_id, 0);
       setPhase('shop');
       setMessage('Welcome! Buy cards and build your deck!');
     } catch (error) {
@@ -150,16 +155,16 @@ export default function DeckBattlerApp() {
       console.log('WS Message:', data);
       
       if (data.type === 'connected') {
-        setGameState(data.game_state);
+        updateStateFromServer(data.game_state);
       } else if (data.type === 'action_result') {
-        setGameState(data.game_state);
+        updateStateFromServer(data.game_state);
         setMessage(data.result.message);
       } else if (data.type === 'ai_thinking') {
         setMessage('AI is thinking...');
       } else if (data.type === 'ai_action') {
         setCombatLog(prev => [...prev, `AI ${data.action}: ${data.card?.name || ''}`]);
       } else if (data.type === 'ai_turn_complete') {
-        setGameState(data.game_state);
+        updateStateFromServer(data.game_state);
         setMessage('AI finished its turn. Starting combat...');
         setTimeout(() => runCombat(), 2000);
       } else if (data.type === 'combat_start') {
@@ -170,8 +175,8 @@ export default function DeckBattlerApp() {
       } else if (data.type === 'combat_end') {
         const winner = data.winner === 0 ? 'You' : 'AI';
         setCombatLog(prev => [...prev, `${winner} won! Damage: ${data.damage}`]);
-        setGameState(data.game_state);
-        
+        updateStateFromServer(data.game_state);
+
         // Check game over
         if (data.game_state.players[0].hp <= 0) {
           setPhase('gameOver');
@@ -183,8 +188,7 @@ export default function DeckBattlerApp() {
           setTimeout(() => startNextRound(), 3000);
         }
       } else if (data.type === 'round_start') {
-        setGameState(data.game_state);
-        generateShop(gameId, 0);
+        updateStateFromServer(data.game_state);
         setPhase('shop');
         setMessage(`Round ${data.round} - Your turn!`);
         setCombatLog([]);
@@ -202,23 +206,10 @@ export default function DeckBattlerApp() {
     wsRef.current = ws;
   };
 
-  // Generate shop
-  const generateShop = async (gId, playerId) => {
-    try {
-      const response = await fetch(`${API_URL}/api/game/${gId}/shop?player_id=${playerId}`, {
-        method: 'POST'
-      });
-      const data = await response.json();
-      setShop(data.shop);
-    } catch (error) {
-      console.error('Error generating shop:', error);
-    }
-  };
-
   // Buy card
   const buyCard = async (cardIdx) => {
     if (!gameId) return;
-    
+
     try {
       await fetch(`${API_URL}/api/game/action`, {
         method: 'POST',
@@ -226,7 +217,7 @@ export default function DeckBattlerApp() {
         body: JSON.stringify({
           game_id: gameId,
           player_id: 0,
-          action: { type: 'buy', card_idx: cardIdx, shop: shop }
+          action: { type: 'buy', card_idx: cardIdx }
         })
       });
     } catch (error) {
@@ -234,10 +225,27 @@ export default function DeckBattlerApp() {
     }
   };
 
+  const rerollShop = async () => {
+    if (!gameId) return;
+    try {
+      await fetch(`${API_URL}/api/game/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          game_id: gameId,
+          player_id: 0,
+          action: { type: 'reroll' }
+        })
+      });
+    } catch (error) {
+      console.error('Error rerolling shop:', error);
+    }
+  };
+
   // Level up
   const levelUp = async () => {
     if (!gameId) return;
-    
+
     try {
       await fetch(`${API_URL}/api/game/action`, {
         method: 'POST',
@@ -298,7 +306,6 @@ export default function DeckBattlerApp() {
     }
   };
 
-  // Start next round
   const startNextRound = async () => {
     try {
       await fetch(`${API_URL}/api/game/${gameId}/round/start`, {
@@ -529,7 +536,7 @@ export default function DeckBattlerApp() {
                   Shop
                 </h3>
                 <button
-                  onClick={() => generateShop(gameId, 0)}
+                  onClick={rerollShop}
                   disabled={player?.gold < 2}
                   className="px-3 py-1 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 disabled:opacity-50 rounded text-sm font-bold transition-all"
                 >
